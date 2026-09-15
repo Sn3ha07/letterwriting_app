@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+}
+
+.font-serif-formal {
+  font-family: 'EB Garamond', Georgia, Cambria, serif;
+}
+
+.font-sans-formal {
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+}
+
+.font-display-formal {
+  font-family: 'Cinzel', serif;
+}
+
+/* Print styling for direct letter export */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Hide navigation, toolbars, sidebars, modals */
+  .no-print, header, nav, button, .sidebar-panel, .floating-actions, .modal-backdrop {
+    display: none !important;
+  }
+
+  /* Show only printable document */
+  .printable-letter-container {
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 1.5cm !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    background: #ffffff !important;
+  }
+
+  @page {
+    size: letter portrait;
+    margin: 1.5cm;
+  }
+}

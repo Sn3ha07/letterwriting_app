@@ -1,0 +1,6 @@
+{
+  "name": "LetterCraft - Formal Letter Assistant",
+  "description": "AI-assisted formal letter writing with recipient tailoring, custom templates, contacts library, and PDF export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
