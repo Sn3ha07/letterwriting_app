@@ -44,7 +44,11 @@ import {
   Send,
   X,
   Compass,
+  Bot,
+  ShieldAlert,
+  Target,
 } from 'lucide-react';
+import { LetterAgentPanel } from './LetterAgentPanel';
 
 interface DraftingWorkspaceProps {
   currentLetter: GeneratedLetter;
@@ -90,6 +94,7 @@ export function DraftingWorkspace({
   // View state: 'canvas' (paper layout) or 'freeform' (raw text drafting) - default to freeform draft pad
   const [viewMode, setViewMode] = useState<'canvas' | 'freeform'>('freeform');
   const [showStructureGuide, setShowStructureGuide] = useState(true);
+  const [isAgentOpen, setIsAgentOpen] = useState(true);
 
   const [rawDraftText, setRawDraftText] = useState(() => {
     return [
@@ -264,6 +269,130 @@ export function DraftingWorkspace({
   const handleTriggerSectionEdit = (section: SectionTarget) => {
     setSectionTarget(section);
     handleAssistantEdit('partial_edit', section);
+  };
+
+  // Handler for adding Socratic formulated sentences directly without removing existing writing
+  const handleAddSentenceToDraft = (sentence: string, section?: string) => {
+    const cleanSentence = sentence.trim();
+    if (!cleanSentence) return;
+
+    // 1. Add to rawDraftText (keeping all previous user writing intact)
+    setRawDraftText((prev) => {
+      const current = prev.trim();
+      if (!current) return cleanSentence;
+      return `${current}\n\n${cleanSentence}`;
+    });
+
+    // 2. Add to structured currentLetter sections (never removing existing paragraphs)
+    if (section === 'callToAction') {
+      onUpdateLetter({
+        ...currentLetter,
+        callToAction: currentLetter.callToAction
+          ? `${currentLetter.callToAction.trim()} ${cleanSentence}`
+          : cleanSentence,
+      });
+    } else {
+      const existingParas = currentLetter.bodyParagraphs ? [...currentLetter.bodyParagraphs] : [];
+      existingParas.push(cleanSentence);
+      onUpdateLetter({
+        ...currentLetter,
+        bodyParagraphs: existingParas,
+      });
+    }
+
+    setEditorialSummary(`Added sentence to draft: "${cleanSentence.slice(0, 50)}..."`);
+    setTimeout(() => {
+      setEditorialSummary(null);
+    }, 4000);
+  };
+
+  // Handler for accepting Socratic Letter Agent revisions (supports append or replace)
+  const handleApplyAgentLetter = (
+    updated: GeneratedLetter,
+    notes?: string[],
+    mode: 'append' | 'replace' = 'append'
+  ) => {
+    if (!originalDraft) {
+      onSetOriginalDraft(currentLetter);
+    }
+
+    if (mode === 'replace') {
+      // Explicit user replace confirmation
+      onUpdateLetter(updated);
+      const newRaw = [
+        updated.subject ? `Subject: ${updated.subject}` : '',
+        updated.salutation,
+        updated.opening,
+        ...(updated.bodyParagraphs || []),
+        updated.callToAction,
+        updated.signOff,
+        updated.senderBlock,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      setRawDraftText(newRaw);
+    } else {
+      // Default: APPEND mode. Never remove previous sentences!
+      const existingParas = currentLetter.bodyParagraphs ? [...currentLetter.bodyParagraphs] : [];
+      const newParasToAdd: string[] = [];
+
+      if (updated.bodyParagraphs && updated.bodyParagraphs.length > 0) {
+        for (const p of updated.bodyParagraphs) {
+          if (!existingParas.includes(p) && !existingParas.some((ep) => ep.includes(p))) {
+            newParasToAdd.push(p);
+          }
+        }
+      }
+
+      const mergedParas = [...existingParas, ...newParasToAdd];
+
+      const mergedLetter: GeneratedLetter = {
+        ...currentLetter,
+        subject: currentLetter.subject || updated.subject,
+        salutation: currentLetter.salutation || updated.salutation,
+        opening: currentLetter.opening || updated.opening,
+        bodyParagraphs: mergedParas.length > 0 ? mergedParas : updated.bodyParagraphs,
+        callToAction: currentLetter.callToAction
+          ? (updated.callToAction && !currentLetter.callToAction.includes(updated.callToAction)
+              ? `${currentLetter.callToAction.trim()} ${updated.callToAction}`
+              : currentLetter.callToAction)
+          : updated.callToAction,
+        signOff: currentLetter.signOff || updated.signOff,
+        senderBlock: currentLetter.senderBlock || updated.senderBlock,
+        executiveSummary: updated.executiveSummary,
+      };
+
+      onUpdateLetter(mergedLetter);
+
+      // In raw text: append newly formulated content, keeping user's text 100% intact!
+      if (newParasToAdd.length > 0) {
+        setRawDraftText((prev) => {
+          const trimmedPrev = prev.trim();
+          if (!trimmedPrev) {
+            return [
+              mergedLetter.subject ? `Subject: ${mergedLetter.subject}` : '',
+              mergedLetter.salutation,
+              mergedLetter.opening,
+              ...mergedParas,
+              mergedLetter.callToAction,
+              mergedLetter.signOff,
+              mergedLetter.senderBlock,
+            ]
+              .filter(Boolean)
+              .join('\n\n');
+          }
+          return `${trimmedPrev}\n\n${newParasToAdd.join('\n\n')}`;
+        });
+      }
+    }
+
+    if (notes && notes.length > 0) {
+      setEditorialNotes(notes);
+    }
+    if (updated.executiveSummary) {
+      setEditorialSummary(updated.executiveSummary);
+    }
+    setShowingDiffView('current');
   };
 
   // Undo / Revert to original user draft
@@ -846,6 +975,25 @@ export function DraftingWorkspace({
               </div>
             )}
           </div>
+
+          <div className="h-4 w-px bg-neutral-200 mx-1 hidden sm:block" />
+
+          {/* Socratic Letter Agent Toggle Button */}
+          <button
+            id="toggle-letter-agent-btn"
+            type="button"
+            onClick={() => setIsAgentOpen(!isAgentOpen)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border shadow-2xs ${
+              isAgentOpen
+                ? 'bg-neutral-900 text-amber-300 border-neutral-800 ring-1 ring-amber-500/50'
+                : 'bg-white text-neutral-800 border-neutral-300 hover:bg-neutral-50'
+            }`}
+            title="Toggle Socratic Letter Agent panel"
+          >
+            <Bot className={`w-3.5 h-3.5 ${isAgentOpen ? 'text-amber-400' : 'text-amber-800'}`} />
+            <span>Gemini Letter Agent</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse ml-0.5" />
+          </button>
         </div>
       </div>
 
@@ -951,9 +1099,10 @@ export function DraftingWorkspace({
         </div>
       )}
 
-      {/* 3. WRITING CANVAS OR FREEFORM DRAFT PAD */}
-      <div className="flex-1 overflow-hidden flex flex-col relative">
-        {viewMode === 'freeform' ? (
+      {/* 3. WRITING CANVAS OR FREEFORM DRAFT PAD + SOCRATIC AGENT SPLIT VIEW */}
+      <div className="flex-1 overflow-hidden flex flex-row relative">
+        <div className="flex-1 overflow-hidden flex flex-col relative min-w-0">
+          {viewMode === 'freeform' ? (
           /* Freeform Draft Pad for fast, unconstrained writing */
           <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 flex flex-col items-center bg-neutral-200/50 space-y-4">
             {/* Guidance Component: Structure and Layout Suggestions with clickable sentence starters */}
@@ -992,9 +1141,20 @@ export function DraftingWorkspace({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => handleAssistantEdit('full_edit')}
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setIsAgentOpen(true)}
+                    className="px-3.5 py-2 bg-white hover:bg-amber-50 border border-neutral-300 hover:border-amber-400 rounded-lg text-xs font-semibold text-neutral-800 flex items-center gap-1.5 shadow-2xs transition-all"
+                    title="Open the Socratic Letter Agent to question and interrogate your writing"
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Question Writing</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleAssistantEdit('full_edit')}
                   disabled={isAssistantEditing || !hasEnoughWriting}
                   className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs transition-all shrink-0 ${
                     !hasEnoughWriting
@@ -1023,6 +1183,7 @@ export function DraftingWorkspace({
                     </>
                   )}
                 </button>
+                </div>
               </div>
 
               {/* Real-time word progress bar */}
@@ -1127,6 +1288,22 @@ Or click any sentence starter from the Suggestions & Starters above to insert di
             />
           </div>
         )}
+        </div>
+
+        {/* Socratic Letter Agent Panel */}
+        <LetterAgentPanel
+          isOpen={isAgentOpen}
+          onClose={() => setIsAgentOpen(false)}
+          currentLetter={currentLetter}
+          rawDraftText={rawDraftText}
+          recipient={recipient}
+          sender={sender}
+          letterType="Custom Formal Letter"
+          targetTone={targetTone}
+          targetComplexity={targetComplexity}
+          onApplyUpdatedLetter={handleApplyAgentLetter}
+          onAddSentenceToDraft={handleAddSentenceToDraft}
+        />
       </div>
     </div>
   );

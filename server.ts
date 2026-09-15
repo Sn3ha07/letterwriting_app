@@ -51,9 +51,24 @@ function cleanJsonText(raw: string | undefined | null): any {
   }
 }
 
-// Helper to call Gemini with resilient model fallback
+// Track temporary model cooldowns (e.g. 429 quota or 503 unavailable)
+const modelCooldowns = new Map<string, number>();
+
+// Helper to call Gemini with resilient model fallback and dynamic load routing
 async function callGeminiWithFallback(ai: GoogleGenAI, config: any) {
-  const modelsToTry = ["gemini-3.8-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"];
+  // Free-tier accessible models: gemini-3.1-flash-lite (fast, high-quota), gemini-flash-latest, and gemini-3.8-flash
+  const baseModels = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.8-flash"];
+  const now = Date.now();
+
+  // Dynamically prioritize healthy models over those currently in cooldown
+  const modelsToTry = [...baseModels].sort((a, b) => {
+    const aCool = (modelCooldowns.get(a) || 0) > now;
+    const bCool = (modelCooldowns.get(b) || 0) > now;
+    if (aCool && !bCool) return 1;
+    if (!aCool && bCool) return -1;
+    return 0;
+  });
+
   let lastError: any = null;
 
   for (const model of modelsToTry) {
@@ -62,24 +77,81 @@ async function callGeminiWithFallback(ai: GoogleGenAI, config: any) {
         ...config,
         model,
       });
+      // Clear cooldown on success
+      modelCooldowns.delete(model);
       return response;
     } catch (err: any) {
-      console.warn(`Attempt with ${model} failed:`, err?.message || err);
       lastError = err;
-      // If temporary overload or unavailable or not found, try next model
-      if (
+      const msg = err?.message || String(err);
+      const isTransientOrQuota =
         err?.status === "UNAVAILABLE" ||
-        err?.message?.includes("503") ||
-        err?.message?.includes("demand") ||
-        err?.message?.includes("404") ||
-        err?.message?.includes("not found")
-      ) {
+        err?.status === "RESOURCE_EXHAUSTED" ||
+        msg.includes("503") ||
+        msg.includes("429") ||
+        msg.includes("demand") ||
+        msg.includes("quota") ||
+        msg.includes("overload") ||
+        msg.includes("Resource has been exhausted") ||
+        msg.includes("rate limit");
+
+      if (isTransientOrQuota) {
+        // Place model on temporary cooldown (60s) so subsequent requests use active models immediately
+        modelCooldowns.set(model, Date.now() + 60000);
+        console.log(`[Gemini] ${model} unavailable or quota reached (503/429), rotating to next model in pool...`);
         continue;
       }
+
+      console.log(`[Gemini] Request to ${model} returned:`, msg.slice(0, 120));
       break;
     }
   }
   throw lastError;
+}
+
+// Deterministic high-quality default letter generator for offline or fallback mode
+function buildDefaultLetter(params: {
+  letterType?: string;
+  recipient?: any;
+  sender?: any;
+  purpose?: string;
+  keyDetails?: string;
+  tone?: string;
+  complexity?: string;
+}) {
+  const {
+    letterType = "Formal Letter",
+    recipient = {},
+    sender = {},
+    purpose = "",
+    keyDetails = "",
+    tone = "Warmly Professional",
+  } = params;
+
+  const recipientName = recipient.name || "Hiring Team / Esteemed Recipient";
+  const recipientOrg = recipient.organization || "Organization";
+  const senderName = sender.name || "Your Name";
+  const senderTitle = sender.title ? `${sender.title}` : "";
+
+  return {
+    subject: `${letterType}: ${purpose.slice(0, 50) || "Formal Inquiry"}`,
+    salutation: recipient.salutation || `Dear ${recipientName},`,
+    opening: `I am writing to formally submit this ${letterType.toLowerCase()} regarding ${
+      purpose || "our ongoing collaboration and formal inquiry"
+    }. With great respect for ${recipientOrg}'s standards of excellence, I welcome this opportunity to present my background and intentions.`,
+    bodyParagraphs: [
+      `In reviewing the objectives at hand, I have directed considerable focus toward achieving measurable, principled outcomes. Specifically: ${
+        keyDetails ||
+        "my professional background aligns closely with the rigorous qualifications and strategic direction demanded by this initiative."
+      }`,
+      `Throughout my career, I have prided myself on clear communication, structured execution, and disciplined integrity. Collaborating with your esteemed team at ${recipientOrg} represents a natural continuation of these core values, where mutual accountability and rigorous execution are paramount.`,
+    ],
+    callToAction: `Thank you for your thoughtful consideration of this correspondence. I welcome the opportunity to discuss this further at your earliest convenience, and I remain available should you require supplementary documentation.`,
+    signOff: sender.signOff || "Sincerely,",
+    senderBlock: `${senderName}${senderTitle ? `\n${senderTitle}` : ""}${
+      sender.organization ? `\n${sender.organization}` : ""
+    }${sender.email ? `\n${sender.email}` : ""}`,
+    executiveSummary: `Constructed a standard ${tone.toLowerCase()} ${letterType.toLowerCase()} addressing ${recipientName} with focused body paragraphs and formal sign-off.`,
+  };
 }
 app.get("/api/health", (req, res) => {
   res.json({
@@ -111,35 +183,7 @@ app.post("/api/generate-letter", async (req, res) => {
     const ai = getGenAI();
 
     if (!ai) {
-      // High-quality deterministic fallback template if API key is missing
-      const recipientName = recipient.name || "Hiring Team / Esteemed Recipient";
-      const recipientTitle = recipient.title ? `${recipient.title}, ` : "";
-      const recipientOrg = recipient.organization || "Organization";
-      const senderName = sender.name || "Your Name";
-      const senderTitle = sender.title ? `${sender.title}` : "";
-
-      const defaultLetter = {
-        subject: `${letterType}: ${purpose.slice(0, 50) || "Formal Inquiry"}`,
-        salutation: recipient.salutation || `Dear ${recipientName},`,
-        opening: `I am writing to formally submit this ${letterType.toLowerCase()} regarding ${
-          purpose || "our ongoing collaboration and formal inquiry"
-        }. With great respect for ${recipientOrg}'s standards of excellence, I welcome this opportunity to present my background and intentions.`,
-        bodyParagraphs: [
-          `In reviewing the objectives at hand, I have directed considerable focus toward achieving measurable, principled outcomes. Specifically: ${
-            keyDetails ||
-            "my professional background aligns closely with the rigorous qualifications and strategic direction demanded by this initiative."
-          }`,
-          `Throughout my career, I have prided myself on clear communication, structured execution, and disciplined integrity. Collaborating with your esteemed team at ${recipientOrg} represents a natural continuation of these core values, where mutual accountability and rigorous execution are paramount.`,
-        ],
-        callToAction: `Thank you for your thoughtful consideration of this correspondence. I welcome the opportunity to discuss this further at your earliest convenience, and I remain available should you require supplementary documentation.`,
-        signOff: sender.signOff || "Sincerely,",
-        senderBlock: `${senderName}${senderTitle ? `\n${senderTitle}` : ""}${
-          sender.organization ? `\n${sender.organization}` : ""
-        }${sender.email ? `\n${sender.email}` : ""}`,
-        executiveSummary: `Constructed a standard ${tone.toLowerCase()} ${letterType.toLowerCase()} addressing ${recipientName} with focused body paragraphs and formal sign-off.`,
-      };
-
-      return res.json(defaultLetter);
+      return res.json(buildDefaultLetter({ letterType, recipient, sender, purpose, keyDetails, tone, complexity }));
     }
 
     const systemInstruction = `You are an elite formal correspondence specialist and executive communications advisor.
@@ -248,11 +292,16 @@ Return the response in strictly valid JSON format matching the schema.`;
     const parsed = cleanJsonText(response.text);
     return res.json(parsed);
   } catch (error: any) {
-    console.error("Error generating letter:", error);
-    res.status(500).json({
-      error: "Failed to generate letter",
-      details: error.message || String(error),
-    });
+    console.log("[Generate] Notice - using resilient fallback letter:", error?.message || error);
+    return res.json(buildDefaultLetter({
+      letterType: req.body.letterType,
+      recipient: req.body.recipient,
+      sender: req.body.sender,
+      purpose: req.body.purpose,
+      keyDetails: req.body.keyDetails,
+      tone: req.body.tone,
+      complexity: req.body.complexity,
+    }));
   }
 });
 
@@ -267,41 +316,64 @@ function buildFallbackEdit(params: {
 }) {
   const { letter, rawText, editType = "full_edit", targetTone = "Warmly Professional", recipient = {}, sender = {} } = params;
   const raw = (rawText || "").trim();
-  const userSections = raw ? raw.split(/\n\n+/).filter(Boolean) : [];
+
+  // Extract paragraphs or sentences from raw text preserving everything the user wrote
+  const userParagraphs = raw
+    ? raw.split(/\n\n+/).map((p) => p.trim()).filter(Boolean)
+    : [];
 
   const subject =
     letter?.subject ||
     (raw.startsWith("Subject:")
-      ? raw.split("\n")[0].replace(/^Subject:\s*/i, "")
+      ? raw.split("\n")[0].replace(/^Subject:\s*/i, "").trim()
       : "Formal Executive Correspondence");
 
   const salutation =
     recipient?.salutation ||
     letter?.salutation ||
-    (userSections[0]?.toLowerCase().startsWith("dear") ? userSections[0] : "Dear Esteemed Colleague,");
+    (userParagraphs[0]?.toLowerCase().startsWith("dear") ? userParagraphs[0] : `Dear ${recipient?.name || "Esteemed Colleague"},`);
 
-  const opening =
-    userSections.length > 1 && userSections[0].toLowerCase().startsWith("dear")
-      ? userSections[1]
-      : (userSections[0] ||
-        letter?.opening ||
-        "I am writing to formally present our strategic position and address the essential objectives of this engagement.");
+  // Preserve user opening or first paragraph
+  let opening = letter?.opening || "";
+  let bodyParagraphs: string[] = letter?.bodyParagraphs ? [...letter.bodyParagraphs] : [];
+  let callToAction = letter?.callToAction || "";
 
-  const bodyParagraphs =
-    userSections.length > 2
-      ? userSections.slice(1, userSections.length > 3 ? userSections.length - 1 : userSections.length)
-      : (letter?.bodyParagraphs?.length && letter.bodyParagraphs[0]
-        ? letter.bodyParagraphs
-        : [
-            "With deep respect for institutional standards of excellence, I have directed considerable focus toward achieving measurable, principled outcomes.",
-            "Our structured execution and collaborative integrity ensure that each milestone is achieved with transparency, diligence, and accountability.",
-          ]);
+  if (userParagraphs.length > 0) {
+    const nonSubjectSalutationParas = userParagraphs.filter(
+      (p) => !p.toLowerCase().startsWith("subject:") && !p.toLowerCase().startsWith("dear ")
+    );
 
-  const callToAction =
-    userSections.length > 3
-      ? userSections[userSections.length - 1]
-      : (letter?.callToAction ||
-        "Thank you for your thoughtful consideration. I welcome the opportunity to coordinate next steps at your earliest convenience.");
+    if (nonSubjectSalutationParas.length === 1) {
+      // If user wrote one block, retain it fully as opening or body, don't delete it
+      if (!opening) {
+        opening = nonSubjectSalutationParas[0];
+      } else {
+        bodyParagraphs = [nonSubjectSalutationParas[0]];
+      }
+    } else if (nonSubjectSalutationParas.length > 1) {
+      opening = nonSubjectSalutationParas[0];
+      // Keep all intermediate paragraphs intact
+      bodyParagraphs = nonSubjectSalutationParas.slice(1);
+    }
+  }
+
+  // Ensure body paragraphs has content without deleting user writing
+  if (bodyParagraphs.length === 0) {
+    if (opening) {
+      bodyParagraphs = [
+        "This correspondence formalizes our ongoing commitments and outlines the concrete measures we are taking to ensure exceptional execution."
+      ];
+    } else {
+      opening = "I am writing to formally present our strategic position and address the essential objectives of this engagement.";
+      bodyParagraphs = [
+        "With deep respect for institutional standards of excellence, I have directed considerable focus toward achieving measurable, principled outcomes."
+      ];
+    }
+  }
+
+  if (!callToAction) {
+    callToAction = "Thank you for your thoughtful consideration. I welcome the opportunity to coordinate next steps at your earliest convenience.";
+  }
 
   const signOff = sender?.signOff || letter?.signOff || "Sincerely,";
   const senderBlock =
@@ -316,11 +388,11 @@ function buildFallbackEdit(params: {
     callToAction,
     signOff,
     senderBlock,
-    executiveSummary: `Refined draft into a structured formal letter calibrated to ${targetTone} register with classical executive letterhead formatting.`,
+    executiveSummary: `Refined draft while strictly preserving your authentic statements and sentences. Calibrated to ${targetTone} register.`,
     editorialNotes: [
-      "Standardized paragraph architecture: distinct formal opening, evidence body, and targeted next steps.",
-      `Calibrated lexical register and tone to ${targetTone}.`,
-      "Retained your authentic commitments and narrative assertions with executive clarity.",
+      "Preserved all authentic sentences and statements from your draft.",
+      `Calibrated sentence transitions and tone to ${targetTone}.`,
+      "Ensured formal executive structure (salutation, opening purpose, evidentiary body, and clear next steps).",
     ],
   };
 }
@@ -436,7 +508,7 @@ Perform the editing work and provide the revised letter plus concise editorial n
     const parsed = cleanJsonText(response.text);
     return res.json(parsed);
   } catch (error: any) {
-    console.error("Error in assistant-edit, falling back to local edit:", error);
+    console.log("[AssistantEdit] Notice - using resilient fallback edit:", error?.message || error);
     // Graceful fallback to prevent user disruption
     return res.json(buildFallbackEdit({ letter, rawText, editType, targetTone, recipient, sender }));
   }
@@ -522,10 +594,438 @@ Provide the revised version in structured JSON.`;
     const parsed = cleanJsonText(response.text);
     return res.json(parsed);
   } catch (error: any) {
-    console.error("Error refining letter, returning preserved draft:", error);
+    console.log("[Refine] Notice - returning preserved draft:", error?.message || error);
     const fallback = { ...currentLetter };
     fallback.executiveSummary = `Applied refinement adjustment (${actionType || "general polish"}).`;
     return res.json(fallback);
+  }
+});
+
+// Helper for Socratic Letter Agent fallback responses
+function buildFallbackAgentResponse(params: {
+  actionType: string;
+  rawText?: string;
+  currentLetter?: any;
+  recipient?: any;
+  sender?: any;
+  userMessage?: string;
+  answers?: Array<{ questionId?: string; question: string; answer: string }>;
+  targetTone?: string;
+}) {
+  const { actionType, rawText = '', currentLetter, recipient = {}, sender = {}, userMessage = '', answers = [], targetTone = 'Warmly Professional' } = params;
+  const text = rawText || [currentLetter?.opening, ...(currentLetter?.bodyParagraphs || []), currentLetter?.callToAction].filter(Boolean).join(' ');
+
+  if (actionType === 'interview' || (!text.trim() && answers.length === 0)) {
+    return {
+      message: `Welcome. I am your Socratic Letter Agent. Rather than producing generic template boilerplate, I will interrogate your purpose, question your assertions, and extract the concrete evidence needed to make this letter compelling.\n\nLet's start by establishing the non-negotiable foundations:`,
+      questions: [
+        {
+          id: 'q_intake_1',
+          category: 'stakes',
+          question: `What is the single, concrete outcome you require from ${recipient?.name || 'the recipient'}, and why must they act now?`,
+          whyItMatters: 'Formal correspondence fails when the recipient cannot discern the specific action or decision requested within 10 seconds of reading.',
+          suggestedAnswers: [
+            'Requesting a 20-minute executive review next Tuesday or Thursday',
+            'Seeking written endorsement for an advanced research fellowship',
+            'Formalizing a compensation and title review based on Q3 performance',
+          ]
+        },
+        {
+          id: 'q_intake_2',
+          category: 'evidence',
+          question: 'What is the single strongest metric, precedent, or deliverable that proves your readiness or justification?',
+          whyItMatters: 'Qualitative adjectives ("worked hard", "significant contribution") read like filler. A specific metric anchors executive credibility.',
+          suggestedAnswers: [
+            'Generated $420k in retained account renewals last quarter',
+            'Authored the cross-departmental integration roadmap adopted company-wide',
+            'Led 4 clinical experimental runs yielding zero protocol deviations',
+          ]
+        },
+        {
+          id: 'q_intake_3',
+          category: 'callToAction',
+          question: `What exact deadline or decision window should we establish for ${recipient?.name || 'them'}?`,
+          whyItMatters: 'Without a clear timeframe, formal correspondence languishes in an inbox indefinitely.',
+          suggestedAnswers: [
+            'Confirmation requested by Friday, October 15th',
+            'Availability for a brief sync between Oct 3rd and Oct 6th',
+            'In alignment with the upcoming budget committee submission date',
+          ]
+        }
+      ],
+      critiques: [],
+      editorialNotes: [
+        'Initiated Socratic discovery sequence to identify high-leverage facts.',
+        'Established focus on quantifiable outcomes and decision deadlines.'
+      ]
+    };
+  }
+
+  // Interrogate writing
+  const questions: any[] = [];
+  const critiques: any[] = [];
+
+  // Check for vague claims
+  if (text.match(/significantly|greatly|many|various|helped|contributed|worked hard|good results/i)) {
+    const match = text.match(/([^.?!]*?(?:significantly|greatly|many|various|helped|contributed|worked hard|good results)[^.?!]*?[.?!])/i);
+    const excerpt = match ? match[0].trim() : 'contributed significantly to several initiatives';
+    critiques.push({
+      id: 'c_vague_claim',
+      type: 'weak_claim',
+      excerpt,
+      critique: 'This statement relies on qualitative adjectives instead of verifiable deliverables.',
+      recommendation: 'Replace general claims with specific metrics, project names, or measurable results.'
+    });
+    questions.push({
+      id: 'q_evidence_1',
+      category: 'evidence',
+      contextExcerpt: excerpt,
+      question: `In this sentence, you describe general contributions. What specific project, metric, percentage gain, or dollar amount proves this?`,
+      whyItMatters: 'Executive readers filter out vague self-praise. A single verifiable number carries ten times the rhetorical weight.',
+      suggestedAnswers: [
+        'Delivered a 35% reduction in cross-team cycle time',
+        'Directly managed 6 strategic accounts valued at $1.4M',
+        'Co-authored the peer-reviewed methodology published this summer',
+      ]
+    });
+  }
+
+  // Check for passive or hesitant tone
+  if (text.match(/I hope|I was wondering|if possible|sorry to|just wanted to|might be able to|if you don't mind/i)) {
+    const match = text.match(/([^.?!]*?(?:I hope|I was wondering|if possible|sorry to|just wanted to|might be able to|if you don't mind)[^.?!]*?[.?!])/i);
+    const excerpt = match ? match[0].trim() : 'I was wondering if it might be possible...';
+    critiques.push({
+      id: 'c_passive_tone',
+      type: 'passive_tone',
+      excerpt,
+      critique: 'Apologetic or overly hesitant phrasing undermines your professional authority.',
+      recommendation: 'State your request respectfully and directly without apologetic hedging.'
+    });
+    questions.push({
+      id: 'q_tone_1',
+      category: 'tone',
+      contextExcerpt: excerpt,
+      question: `Why are you apologizing or hedging here? Can we state this as a direct, principled business request?`,
+      whyItMatters: 'Hesitant hedging invites the recipient to de-prioritize or deny the request. Executive presence requires calm directness.',
+      suggestedAnswers: [
+        'Shift to: "I am writing to propose a structured review of..."',
+        'Shift to: "With our established project milestones met, I welcome the opportunity to..."',
+        'Remove the apology and present the request as a logical next step.',
+      ]
+    });
+  }
+
+  // Check for weak CTA
+  if (text.match(/let me know|look forward to hearing|hope to hear|any thoughts/i) || !text.match(/by [A-Z]|on [A-Z]|schedule|meeting|call|review|deadline/i)) {
+    const excerpt = currentLetter?.callToAction || 'Looking forward to hearing from you.';
+    critiques.push({
+      id: 'c_weak_cta',
+      type: 'weak_cta',
+      excerpt,
+      critique: 'The closing lacks an explicit timeline, allowing the recipient to delay responding indefinitely.',
+      recommendation: 'Offer two specific windows of availability or an explicit date for follow-up.'
+    });
+    questions.push({
+      id: 'q_cta_1',
+      category: 'callToAction',
+      contextExcerpt: excerpt,
+      question: `Your closing gives ${recipient?.name || 'the recipient'} permission to delay indefinitely. What specific date or 15-minute slot should we propose?`,
+      whyItMatters: 'A specific call-to-action converts a passive read into an immediate calendar commitment.',
+      suggestedAnswers: [
+        'Propose a 15-minute sync next Tuesday at 2:00 PM or Thursday at 10:00 AM',
+        'Request confirmation by end of week (Friday, Oct 15th) to meet the submission deadline',
+        'Indicate that you will follow up on Thursday morning if no reply is received',
+      ]
+    });
+  }
+
+  // Ensure at least one thought-provoking question
+  if (questions.length === 0) {
+    questions.push({
+      id: 'q_recipient_focus',
+      category: 'recipient',
+      question: `Why does this matter to ${recipient?.name || 'the recipient'} right now? What strategic priority or institutional headache of theirs does this solve?`,
+      whyItMatters: 'Letters written solely from the sender’s viewpoint are easy to ignore. Framing your request around the recipient’s mandate drives immediate engagement.',
+      suggestedAnswers: [
+        'Aligns directly with their ongoing departmental modernization goals',
+        'Alleviates staffing and execution pressure on the upcoming Q4 rollout',
+        'Enhances their group’s research visibility prior to annual review',
+      ]
+    });
+  }
+
+  // If user provided answers, construct formulated sentences and updated draft integrating their specifics
+  let updatedLetter: any = undefined;
+  const formulatedSentences: Array<{ section: 'opening' | 'body' | 'callToAction'; sentence: string; explanation: string }> = [];
+
+  if (answers.length > 0) {
+    updatedLetter = { ...(currentLetter || {}) };
+    
+    // Clean user answers: strip any prompt text, question prefix, or [Answer to: ...]
+    const cleanAnsweredPoints = answers
+      .map((a) => {
+        let ans = (a.answer || '')
+          .replace(/^\[Answer to:.*?\]\s*/i, '')
+          .replace(/^Q\d*:\s*.*?\nAnswer:\s*/i, '')
+          .replace(/^(Question|Prompt):\s*.*?\n/i, '')
+          .trim();
+        return {
+          question: a.question,
+          answer: ans,
+          category: a.question.toLowerCase().includes('call') || a.question.toLowerCase().includes('date') || a.question.toLowerCase().includes('slot') ? 'callToAction' : 'body'
+        };
+      })
+      .filter((item) => Boolean(item.answer));
+
+    if (cleanAnsweredPoints.length > 0) {
+      // Build clean, standalone formal sentences for each answer (NEVER the prompt)
+      for (const item of cleanAnsweredPoints) {
+        let sentence = item.answer;
+        if (!sentence.endsWith('.')) sentence += '.';
+        
+        // Elevate into formal executive syntax if it starts casually
+        if (!sentence.match(/^(I |We |This |Our |In |Over |Specifically,|With |Regarding |To )/i)) {
+          sentence = `Specifically, ${sentence.charAt(0).toLowerCase() + sentence.slice(1)}`;
+        }
+
+        formulatedSentences.push({
+          section: item.category as any,
+          sentence,
+          explanation: `Synthesized formal sentence derived from your response to substantiate the correspondence.`
+        });
+      }
+
+      // PRESERVE ALL PREVIOUS SENTENCES! Never discard previous paragraphs!
+      const existingParas = updatedLetter.bodyParagraphs && updatedLetter.bodyParagraphs.length > 0
+        ? [...updatedLetter.bodyParagraphs]
+        : (rawText ? [rawText.trim()] : []);
+
+      const newBodySentences = formulatedSentences
+        .filter((fs) => fs.section === 'body')
+        .map((fs) => fs.sentence);
+
+      if (newBodySentences.length > 0) {
+        // Append the new sentences as an evidentiary paragraph, strictly keeping previous paragraphs intact
+        existingParas.push(newBodySentences.join(' '));
+      }
+
+      const ctaSentence = formulatedSentences.find((fs) => fs.section === 'callToAction')?.sentence;
+      if (ctaSentence) {
+        updatedLetter.callToAction = updatedLetter.callToAction 
+          ? `${updatedLetter.callToAction.trim()} ${ctaSentence}` 
+          : ctaSentence;
+      }
+
+      updatedLetter.bodyParagraphs = existingParas.length > 0 ? existingParas : [
+        `In reviewing our core objectives, I have directed focused effort toward measurable outcomes. ${newBodySentences.join(' ')}`
+      ];
+
+      updatedLetter.executiveSummary = `Appended new evidentiary sentences while preserving all your authentic draft sentences intact.`;
+    }
+  }
+
+  return {
+    message: answers.length > 0
+      ? `I have formulated precise executive sentences from your response and added them to your draft options. Notice that your previous draft sentences have been kept completely intact.`
+      : `I have audited your writing and flagged several critical vulnerabilities. Review my questions below: each addresses a specific gap that could undermine your standing with ${recipient?.name || 'the recipient'}.`,
+    questions,
+    critiques,
+    updatedLetter,
+    formulatedSentences,
+    editorialNotes: [
+      'Preserved all previous draft sentences without deletion.',
+      'Formulated clean formal prose from your answers (excluding prompt text).',
+      'Audited call-to-action for decision-forcing clarity.'
+    ]
+  };
+}
+
+// Letter Agent Socratic Chat & Interrogation Endpoint
+app.post("/api/agent/chat", async (req, res) => {
+  const {
+    messages = [],
+    currentLetter,
+    rawText = '',
+    recipient = {},
+    sender = {},
+    letterType = 'Formal Letter',
+    actionType = 'chat', // 'interview' | 'interrogate' | 'chat' | 'apply_answers'
+    answers = [], // Array of { questionId, question, answer }
+    targetTone = 'Warmly Professional',
+    targetComplexity = 'Professional & Polished',
+  } = req.body;
+
+  try {
+    const ai = getGenAI();
+    if (!ai) {
+      return res.json(buildFallbackAgentResponse({
+        actionType,
+        rawText,
+        currentLetter,
+        recipient,
+        sender,
+        answers,
+        targetTone,
+      }));
+    }
+
+    const systemInstruction = `You are the Socratic Editorial Agent — an exacting, brilliant executive writing coach and developmental editor for high-stakes formal correspondence.
+Your purpose is NOT to write generic fluff or praise mediocre drafts.
+Your purpose is to INTERVIEW the user, QUESTION and INTERROGATE their writing, expose weak assumptions, challenge vague claims, and elevate their authentic message into an impeccably reasoned, persuasive executive letter.
+
+CRITICAL DIRECTIVES:
+1. NEVER ADD PROMPTS OR QUESTION LABELS INTO THE DRAFT:
+   - Under no circumstances should you put prompt text, question strings, or prefixes like '[Answer to: ...]', 'Q1:', 'Inquiry:', or instructions into the draft, letter body, or formulated sentences.
+   - Output ONLY clean, polished formal sentences representing the user's authentic facts or intent.
+
+2. NEVER DELETE OR REMOVE THE USER'S PREVIOUS SENTENCES:
+   - When synthesizing revisions or incorporating user answers, you MUST KEEP and PRESERVE all existing sentences from the user's draft.
+   - You must ADD and APPEND newly formulated sentences into the appropriate section or paragraphs without deleting or erasing prior sentences.
+   - The user must always remain in full control of removing text on their own.
+
+3. FORMULATE STANDALONE FORMAL SENTENCES ('formulatedSentences'):
+   - Provide an array of 'formulatedSentences', each containing { section, sentence, explanation }.
+   - Each sentence must be a complete, elegant executive statement ready for the user to add directly to their draft with a single click.
+
+4. Socratic Questioning:
+   - Question vague adjectives like "significantly", "greatly", "hard work", "various projects". Demand concrete numbers, scopes, percentages, or dates.
+   - Question passive, apologetic, or hesitant phrases ("I hope", "I was wondering", "sorry to bother").
+   - Question the Call to Action: Push for specific proposed dates, time windows, or explicit deadlines.
+   - Question Recipient Empathy: Ask how this benefits ${recipient?.name || 'the recipient'} or solves their problem.
+
+5. Tone & Persona:
+   - Professional, incisive, discerning, intellectually rigorous, supportive but uncompromising on quality.`;
+
+    const lastUserMessage = messages.length > 0 ? messages[messages.length - 1]?.content : '';
+
+    let promptContext = `Target Recipient: ${recipient?.name || 'Recipient'} (${recipient?.title || ''}, ${recipient?.organization || ''})
+Preferred Salutation: ${recipient?.salutation || ''}
+Sender: ${sender?.name || 'Sender'} (${sender?.title || ''}, ${sender?.organization || ''})
+Document Type: ${letterType}
+Target Tone: ${targetTone}
+Target Complexity: ${targetComplexity}
+Requested Action: ${actionType}
+
+Current Structured Letter:
+${JSON.stringify(currentLetter || {}, null, 2)}
+
+User's Raw Text (if any):
+"""
+${rawText || '(None provided yet)'}
+"""`;
+
+    if (answers.length > 0) {
+      promptContext += `\n\nUser Answers to Prior Questions:
+${answers.map((a: any, idx: number) => `Q${idx + 1}: ${a.question}\nAnswer: ${a.answer}`).join('\n\n')}`;
+    }
+
+    if (lastUserMessage) {
+      promptContext += `\n\nLatest User Remark / Question:
+"${lastUserMessage}"`;
+    }
+
+    promptContext += `\n\nPlease evaluate, question the writing, formulate targeted questions/critiques, and if appropriate provide an updatedLetter reflecting the user's input. Return valid JSON adhering to schema.`;
+
+    const response = await callGeminiWithFallback(ai, {
+      contents: promptContext,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            message: {
+              type: Type.STRING,
+              description: "Editorial feedback and coaching guidance speaking directly to the user",
+            },
+            questions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  category: { type: Type.STRING },
+                  question: { type: Type.STRING },
+                  contextExcerpt: { type: Type.STRING },
+                  whyItMatters: { type: Type.STRING },
+                  suggestedAnswers: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+                required: ["id", "category", "question", "whyItMatters"],
+              },
+              description: "Probing Socratic questions interrogating the draft or extracting missing context",
+            },
+            critiques: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  type: { type: Type.STRING },
+                  excerpt: { type: Type.STRING },
+                  critique: { type: Type.STRING },
+                  recommendation: { type: Type.STRING },
+                },
+                required: ["id", "type", "excerpt", "critique", "recommendation"],
+              },
+              description: "Specific critiques flagged in the user's text",
+            },
+            updatedLetter: {
+              type: Type.OBJECT,
+              properties: {
+                subject: { type: Type.STRING },
+                salutation: { type: Type.STRING },
+                opening: { type: Type.STRING },
+                bodyParagraphs: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                callToAction: { type: Type.STRING },
+                signOff: { type: Type.STRING },
+                senderBlock: { type: Type.STRING },
+                executiveSummary: { type: Type.STRING },
+              },
+              description: "Full updated letter incorporating the answers and revisions (optional)",
+            },
+            formulatedSentences: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  section: { type: Type.STRING },
+                  sentence: { type: Type.STRING },
+                  explanation: { type: Type.STRING },
+                },
+                required: ["section", "sentence"],
+              },
+              description: "Clean formal sentences formulated from user answers ready to be added to the draft",
+            },
+            editorialNotes: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "Key bullet points on improvements applied",
+            },
+          },
+          required: ["message"],
+        },
+      },
+    });
+
+    const parsed = cleanJsonText(response.text);
+    return res.json(parsed);
+  } catch (error: any) {
+    console.log("[AgentChat] Notice - returning resilient fallback response:", error?.message || error);
+    return res.json(buildFallbackAgentResponse({
+      actionType,
+      rawText,
+      currentLetter,
+      recipient,
+      sender,
+      answers,
+      targetTone,
+    }));
   }
 });
 

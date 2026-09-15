@@ -1,6 +1,6 @@
 {
   "name": "LetterCraft - Formal Letter Assistant",
-  "description": "AI-assisted formal letter writing with recipient tailoring, custom templates, contacts library, and PDF export.",
+  "description": "Socratic executive writing agent and letter craft studio that interrogates your drafts, asks diagnostic questions, and sharpens formal letters.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
